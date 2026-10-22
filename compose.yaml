@@ -1,0 +1,136 @@
+# ProjLab: Enterprise Data Platform (capstone)
+# The lakehouse lab plus the two services the capstone also needs: a Kafka broker for the inventory stream
+# (CAP-3.3) and PostgreSQL with pgvector for the product index (CAP-6.1). When the lakehouse or streaming lab
+# changes, bring this file in line.
+# Used by the dev container (.devcontainer/devcontainer.json) AND by plain `docker compose up`.
+# Credentials are local-only development defaults; override them in .env (never commit .env).
+#
+# Object storage is SeaweedFS, not MinIO: MinIO stopped publishing community Docker images in
+# October 2025 and archived its community repository in February 2026. See README.md.
+name: projlab-enterprise-platform
+
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    init: true
+    user: vscode
+    working_dir: /workspace
+    command: >-
+      jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
+      --ServerApp.root_dir=/workspace --ServerApp.allow_remote_access=True
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-projlab}
+      PYTHONPATH: /workspace/src
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-2g}
+      S3_ENDPOINT_URL: http://seaweedfs:8333
+      S3_BUCKET: ${S3_BUCKET:-lakehouse}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-projlab}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-projlab-local-secret}
+      AWS_REGION: us-east-1
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-projlab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-projlab}
+      POSTGRES_DB: ${POSTGRES_DB:-projlab}
+    volumes:
+      - .:/workspace:cached
+    ports:
+      - "127.0.0.1:${JUPYTER_PORT:-8888}:8888"
+      - "127.0.0.1:${SPARK_UI_PORT:-4040}:4040"
+    networks: [lab]
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    # `weed mini` runs master, volume, filer and the S3 gateway in one small process.
+    command: >-
+      mini -dir=/data -bucket=${S3_BUCKET:-lakehouse}
+      -master.telemetry=false -webdav=false -admin.ui=false
+      -s3.port.iceberg=0 -s3.port.lance=0
+    environment:
+      # SeaweedFS creates an admin identity from these; requests must be signed with them.
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-projlab}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-projlab-local-secret}
+    volumes:
+      - object-data:/data
+    networks: [lab]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    # Not published to your machine; use it from the workspace at http://seaweedfs:8333.
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 20s
+      retries: 12
+      start_period: 20s
+    # Not published to your machine; use it from the workspace at kafka:9092.
+
+  # PostgreSQL 16 with the pgvector extension, for ai.product_chunks (CAP-6.1). db/init enables the extension.
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg16-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-projlab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-projlab}
+      POSTGRES_DB: ${POSTGRES_DB:-projlab}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published to your machine; use it from the workspace at postgres:5432.
+
+volumes:
+  object-data:
+  kafka-data:
+  postgres-data:
+
+networks:
+  lab:

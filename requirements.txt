@@ -1,0 +1,8 @@
+boto3==1.43.105
+confluent-kafka==2.15.1
+delta-spark==3.3.3
+jupyterlab==4.6.4
+pandas==2.3.3
+psycopg[binary]==3.3.6
+pyspark==3.5.9
+pytest==9.1.1
